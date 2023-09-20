@@ -37,8 +37,8 @@ class CognitoIdpResponse(BaseResponse):
 
     def set_user_pool_mfa_config(self) -> str:
         user_pool_id = self._get_param("UserPoolId")
-        sms_config = self._get_param("SmsMfaConfiguration", None)
-        token_config = self._get_param("SoftwareTokenMfaConfiguration", None)
+        sms_mfa_config = self._get_param("SmsMfaConfiguration", None)
+        token_mfa_config = self._get_param("SoftwareTokenMfaConfiguration", None)
         mfa_config = self._get_param("MfaConfiguration")
 
         if mfa_config not in ["ON", "OFF", "OPTIONAL"]:
@@ -47,18 +47,18 @@ class CognitoIdpResponse(BaseResponse):
             )
 
         if mfa_config in ["ON", "OPTIONAL"]:
-            if sms_config is None and token_config is None:
+            if sms_mfa_config is None and token_mfa_config is None:
                 raise InvalidParameterException(
                     "At least one of [SmsMfaConfiguration] or [SoftwareTokenMfaConfiguration] must be provided."
                 )
-            if sms_config is not None:
-                if "SmsConfiguration" not in sms_config:
+            if sms_mfa_config is not None:
+                if "SmsConfiguration" not in sms_mfa_config:
                     raise InvalidParameterException(
                         "[SmsConfiguration] is a required member of [SoftwareTokenMfaConfiguration]."
                     )
 
         response = self.backend.set_user_pool_mfa_config(
-            user_pool_id, sms_config, token_config, mfa_config
+            user_pool_id, sms_mfa_config, token_mfa_config, mfa_config
         )
         return json.dumps(response)
 
