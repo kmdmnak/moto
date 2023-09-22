@@ -60,7 +60,6 @@ class AuthFlow(str, enum.Enum):
 
 
 class CognitoIdpUserPoolAttribute(BaseModel):
-
     STANDARD_SCHEMA = {
         "sub": {
             "AttributeDataType": "String",
@@ -377,11 +376,14 @@ DEFAULT_USER_POOL_CONFIG: Dict[str, Any] = {
             {"Priority": 2, "Name": "verified_phone_number"},
         ]
     },
+    "AutoVerifiedAttributes": [],
+    "MfaConfiguration": "OFF",
+    "SmsConfiguration": {},
+    "SmsAuthenticationMessage": "Your authentication code is {####}",
 }
 
 
 class CognitoIdpUserPool(BaseModel):
-
     MAX_ID_LENGTH = 55
 
     def __init__(
@@ -419,8 +421,6 @@ class CognitoIdpUserPool(BaseModel):
         self.creation_date = utcnow()
         self.last_modified_date = utcnow()
 
-        self.mfa_config = "OFF"
-        self.sms_mfa_config: Optional[Dict[str, Any]] = None
         self.token_mfa_config: Optional[Dict[str, bool]] = None
 
         self.schema_attributes = {}
@@ -480,7 +480,7 @@ class CognitoIdpUserPool(BaseModel):
             "Status": self.status,
             "CreationDate": time.mktime(self.creation_date.timetuple()),
             "LastModifiedDate": time.mktime(self.last_modified_date.timetuple()),
-            "MfaConfiguration": self.mfa_config,
+            "MfaConfiguration": self.extended_config.get("MfaConfiguration"),
             "EstimatedNumberOfUsers": len(self.users),
         }
 
@@ -600,6 +600,16 @@ class CognitoIdpUserPool(BaseModel):
         access_token, expires_in = self.create_access_token(client_id, username)
         id_token, _ = self.create_id_token(client_id, username)
         return access_token, id_token, expires_in
+
+    def get_required_attributes(self) -> List[str]:
+        required_attributes = [
+            attribute.name
+            for attribute in self.schema_attributes.values()
+            if attribute.required
+        ]
+        if self.extended_config.get("MfaConfiguration") == "ON":
+            required_attributes.append("phone_number")
+        return required_attributes
 
     def get_user_extra_data_by_client_id(
         self, client_id: str, username: str
@@ -789,6 +799,7 @@ class CognitoIdpUser(BaseModel):
         password: Optional[str],
         status: str,
         attributes: List[Dict[str, str]],
+        sms_mfa_enabled: bool,
     ):
         self.id = str(random.uuid4())
         self.user_pool_id = user_pool_id
@@ -802,7 +813,7 @@ class CognitoIdpUser(BaseModel):
         self.attribute_lookup = flatten_attrs(attributes)
         self.create_date = utcnow()
         self.last_modified_date = utcnow()
-        self.sms_mfa_enabled = False
+        self.sms_mfa_enabled = sms_mfa_enabled
         self.software_token_mfa_enabled = False
         self.token_verified = False
         self.confirmation_code: Optional[str] = None
@@ -934,6 +945,19 @@ class CognitoIdpBackend(BaseBackend):
     def create_user_pool(
         self, name: str, extended_config: Dict[str, Any]
     ) -> CognitoIdpUserPool:
+        # When MFA is ON, SMS configuration and Auto verification for phone_number are required
+        # see https://github.com/aws/aws-cli/issues/3876#issuecomment-456998093
+        sms_mfa_enabled = extended_config.get("MfaConfiguration") == "ON"
+        if sms_mfa_enabled and (
+            extended_config.get("SmsConfiguration") is None
+            or (
+                extended_config.get("AutoVerifiedAttributes") is None
+                or "phone_number" not in extended_config.get("AutoVerifiedAttributes")
+            )
+        ):
+            raise InvalidParameterException(
+                "An error occurred (InvalidParameterException) when calling the CreateUserPool operation: SMS configuration and Auto verification for phone_number are required when MFA is required/optional"
+            )
         user_pool = CognitoIdpUserPool(
             self.account_id, self.region_name, name, extended_config
         )
@@ -943,14 +967,18 @@ class CognitoIdpBackend(BaseBackend):
     def set_user_pool_mfa_config(
         self,
         user_pool_id: str,
-        sms_config: Dict[str, Any],
-        token_config: Dict[str, bool],
+        sms_mfa_config: Dict[str, Any],
+        token_mfa_config: Dict[str, bool],
         mfa_config: str,
     ) -> Dict[str, Any]:
         user_pool = self.describe_user_pool(user_pool_id)
-        user_pool.mfa_config = mfa_config
-        user_pool.sms_mfa_config = sms_config
-        user_pool.token_mfa_config = token_config
+        user_pool.extended_config["SmsConfiguration"] = sms_mfa_config.get(
+            "SmsConfiguration"
+        )
+        user_pool.extended_config["SmsAuthenticationMessage"] = sms_mfa_config.get(
+            "SmsAuthenticationMessage"
+        )
+        user_pool.token_mfa_config = token_mfa_config
 
         return self.get_user_pool_mfa_config(user_pool_id)
 
@@ -958,9 +986,14 @@ class CognitoIdpBackend(BaseBackend):
         user_pool = self.describe_user_pool(user_pool_id)
 
         return {
-            "SmsMfaConfiguration": user_pool.sms_mfa_config,
+            "MfaConfiguration": user_pool.extended_config["MfaConfiguration"],
+            "SmsMfaConfiguration": {
+                "SmsAuthenticationMessage": user_pool.extended_config[
+                    "SmsAuthenticationMessage"
+                ],
+                "SmsConfiguration": user_pool.extended_config["SmsConfiguration"],
+            },
             "SoftwareTokenMfaConfiguration": user_pool.token_mfa_config,
-            "MfaConfiguration": user_pool.mfa_config,
         }
 
     @paginate(pagination_model=PAGINATION_MODEL)  # type: ignore[misc]
@@ -1291,15 +1324,16 @@ class CognitoIdpBackend(BaseBackend):
                 raise InvalidParameterException(
                     "Username should be either an email or a phone number."
                 )
-
+        sms_mfa_enabled = user_pool.extended_config.get("MfaConfiguration") == "ON"
         user = CognitoIdpUser(
-            user_pool_id,
+            user_pool_id=user_pool_id,
             # set username to None so that it will be default to the internal GUID
             # when them user gets created
-            None if has_username_attrs else username,
-            temporary_password,
-            UserStatus.FORCE_CHANGE_PASSWORD,
-            attributes,
+            username=None if has_username_attrs else username,
+            password=temporary_password,
+            status=UserStatus.FORCE_CHANGE_PASSWORD,
+            attributes=attributes,
+            sms_mfa_enabled=sms_mfa_enabled,
         )
 
         user_pool.users[user.username] = user
@@ -1492,6 +1526,21 @@ class CognitoIdpBackend(BaseBackend):
 
             user.password = new_password
             user.status = UserStatus.CONFIRMED
+
+            if user.software_token_mfa_enabled:
+                return {
+                    "ChallengeName": "SOFTWARE_TOKEN_MFA",
+                    "Session": session,
+                    "ChallengeParameters": {},
+                }
+
+            if user.sms_mfa_enabled:
+                return {
+                    "ChallengeName": "SMS_MFA",
+                    "Session": session,
+                    "ChallengeParameters": {},
+                }
+
             del self.sessions[session]
 
             return self._log_user_in(user_pool, client, username)
@@ -1513,6 +1562,22 @@ class CognitoIdpBackend(BaseBackend):
             if not timestamp:
                 raise ResourceNotFoundError(timestamp)
 
+            if user.status == UserStatus.FORCE_CHANGE_PASSWORD:
+                required_attributes = []
+                for attribute in user_pool.get_required_attributes():
+                    if attribute not in user.attributes:
+                        required_attributes.append(f"userAttributes.{attribute}")
+                user_attributes = flatten_attrs(user.attributes)
+                return {
+                    "ChallengeName": "NEW_PASSWORD_REQUIRED",
+                    "ChallengeParameters": {
+                        "USERNAME": username,
+                        "requiredAttributes": json.dumps(required_attributes),
+                        "userAttributes": json.dumps(user_attributes),
+                    },
+                    "Session": session,
+                }
+
             if user.software_token_mfa_enabled:
                 return {
                     "ChallengeName": "SOFTWARE_TOKEN_MFA",
@@ -1525,15 +1590,6 @@ class CognitoIdpBackend(BaseBackend):
                     "ChallengeName": "SMS_MFA",
                     "Session": session,
                     "ChallengeParameters": {},
-                }
-
-            if user.status == UserStatus.FORCE_CHANGE_PASSWORD:
-                return {
-                    "ChallengeName": "NEW_PASSWORD_REQUIRED",
-                    "ChallengeParameters": {
-                        "USERNAME": username,
-                    },
-                    "Session": session,
                 }
 
             del self.sessions[session]
@@ -1555,7 +1611,13 @@ class CognitoIdpBackend(BaseBackend):
 
             del self.sessions[session]
             return self._log_user_in(user_pool, client, username)
-
+        elif challenge_name == "SMS_MFA":
+            username: str = challenge_responses.get("USERNAME")
+            sms_mfa_code = challenge_responses.get("SMS_MFA_CODE")
+            if sms_mfa_code != "111111":
+                return {}
+            del self.sessions[session]
+            return self._log_user_in(user_pool, client, username)
         else:
             return {}
 
@@ -1783,6 +1845,7 @@ class CognitoIdpBackend(BaseBackend):
 
         self._validate_password(user_pool.id, password)
 
+        sms_mfa_enabled = user_pool.extended_config.get("MfaConfiguration") == "ON"
         user = CognitoIdpUser(
             user_pool_id=user_pool.id,
             # set username to None so that it will be default to the internal GUID
@@ -1791,6 +1854,7 @@ class CognitoIdpBackend(BaseBackend):
             password=password,
             attributes=attributes,
             status=UserStatus.UNCONFIRMED,
+            sms_mfa_enabled=sms_mfa_enabled,
         )
         user_pool.users[user.username] = user
         return user
