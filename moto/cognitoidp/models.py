@@ -1481,9 +1481,24 @@ class CognitoIdpBackend(BaseBackend):
         client = user_pool.clients.get(client_id)
         if not client:
             raise ResourceNotFoundError(client_id)
+        
+        # All challenges require USERNAME and SECRET_HASH
+        # See https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_RespondToAuthChallenge.html#CognitoUserPools-RespondToAuthChallenge-request-ChallengeResponses
+        username: str = challenge_responses.get("USERNAME")
+        if not username:
+            raise InvalidParameterException("Missing required parameter USERNAME")
+
+        # TODO check whether the request contains SECRET_HASH if the client has a client secret
+        # if client.generate_secret:
+        #     secret_hash = challenge_responses.get("SECRET_HASH")
+        #     if secret_hash is None:
+        #         raise InvalidParameterException("Missing required parameter SECRET_HASH")
+        #     if not check_secret_hash(
+        #         client.secret, client.id, username, secret_hash
+        #     ):
+        #         raise NotAuthorizedError(secret_hash)
 
         if challenge_name == "NEW_PASSWORD_REQUIRED":
-            username: str = challenge_responses.get("USERNAME")  # type: ignore[assignment]
             new_password = challenge_responses.get("NEW_PASSWORD")
             if not new_password:
                 raise InvalidPasswordException()
@@ -1496,7 +1511,6 @@ class CognitoIdpBackend(BaseBackend):
 
             return self._log_user_in(user_pool, client, username)
         elif challenge_name == "PASSWORD_VERIFIER":
-            username: str = challenge_responses.get("USERNAME")  # type: ignore[no-redef]
             user = self.admin_get_user(user_pool.id, username)
 
             password_claim_signature = challenge_responses.get(
@@ -1539,7 +1553,6 @@ class CognitoIdpBackend(BaseBackend):
             del self.sessions[session]
             return self._log_user_in(user_pool, client, username)
         elif challenge_name == "SOFTWARE_TOKEN_MFA":
-            username: str = challenge_responses.get("USERNAME")  # type: ignore[no-redef]
             self.admin_get_user(user_pool.id, username)
 
             software_token_mfa_code = challenge_responses.get("SOFTWARE_TOKEN_MFA_CODE")
