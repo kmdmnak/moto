@@ -1527,6 +1527,15 @@ class CognitoIdpBackend(BaseBackend):
             if not timestamp:
                 raise ResourceNotFoundError(timestamp)
 
+            if user.status == UserStatus.FORCE_CHANGE_PASSWORD:
+                return {
+                    "ChallengeName": "NEW_PASSWORD_REQUIRED",
+                    "ChallengeParameters": {
+                        "USERNAME": username,
+                    },
+                    "Session": session,
+                }
+
             if user.software_token_mfa_enabled:
                 return {
                     "ChallengeName": "SOFTWARE_TOKEN_MFA",
@@ -1539,15 +1548,6 @@ class CognitoIdpBackend(BaseBackend):
                     "ChallengeName": "SMS_MFA",
                     "Session": session,
                     "ChallengeParameters": {},
-                }
-
-            if user.status == UserStatus.FORCE_CHANGE_PASSWORD:
-                return {
-                    "ChallengeName": "NEW_PASSWORD_REQUIRED",
-                    "ChallengeParameters": {
-                        "USERNAME": username,
-                    },
-                    "Session": session,
                 }
 
             del self.sessions[session]
