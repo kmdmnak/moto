@@ -1517,6 +1517,21 @@ class CognitoIdpBackend(BaseBackend):
 
             user.password = new_password
             user.status = UserStatus.CONFIRMED
+
+            if user.software_token_mfa_enabled:
+                return {
+                    "ChallengeName": "SOFTWARE_TOKEN_MFA",
+                    "Session": session,
+                    "ChallengeParameters": {},
+                }
+
+            if user.sms_mfa_enabled:
+                return {
+                    "ChallengeName": "SMS_MFA",
+                    "Session": session,
+                    "ChallengeParameters": {},
+                }
+
             del self.sessions[session]
 
             return self._log_user_in(user_pool, client, username)
