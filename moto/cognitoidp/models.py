@@ -601,6 +601,16 @@ class CognitoIdpUserPool(BaseModel):
         id_token, _ = self.create_id_token(client_id, username)
         return access_token, id_token, expires_in
 
+    def get_required_attributes(self) -> List[str]:
+        required_attributes = set(
+            attribute.name
+            for attribute in self.schema_attributes.values()
+            if attribute.required
+        )
+        if self.sms_mfa_config is not None:
+            required_attributes.add("phone_number")
+        return list(required_attributes)
+
     def get_user_extra_data_by_client_id(
         self, client_id: str, username: str
     ) -> Dict[str, Any]:
@@ -1528,10 +1538,19 @@ class CognitoIdpBackend(BaseBackend):
                 raise ResourceNotFoundError(timestamp)
 
             if user.status == UserStatus.FORCE_CHANGE_PASSWORD:
+                unset_required_attributes = []
+                for required_attr in user_pool.get_required_attributes():
+                    if required_attr not in user.attributes:
+                        unset_required_attributes.append(
+                            f"userAttributes.{required_attr}"
+                        )
+                user_attributes = flatten_attrs(user.attributes)
                 return {
                     "ChallengeName": "NEW_PASSWORD_REQUIRED",
                     "ChallengeParameters": {
                         "USERNAME": username,
+                        "requiredAttributes": json.dumps(unset_required_attributes),
+                        "userAttributes": json.dumps(user_attributes),
                     },
                     "Session": session,
                 }
