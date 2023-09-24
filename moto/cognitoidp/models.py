@@ -20,6 +20,7 @@ from .exceptions import (
     UsernameExistsException,
     UserNotConfirmedException,
     InvalidParameterException,
+    CodeMismatchException,
     ExpiredCodeException,
     InvalidPasswordException,
 )
@@ -34,7 +35,7 @@ from .utils import (
 )
 from moto.utilities.paginator import paginate
 from moto.utilities.utils import md5_hash
-from ..settings import get_cognito_idp_user_pool_id_strategy
+from ..settings import get_cognito_idp_user_pool_id_strategy, get_cognito_stub_sms_code
 
 
 class UserStatus(str, enum.Enum):
@@ -60,7 +61,6 @@ class AuthFlow(str, enum.Enum):
 
 
 class CognitoIdpUserPoolAttribute(BaseModel):
-
     STANDARD_SCHEMA = {
         "sub": {
             "AttributeDataType": "String",
@@ -381,7 +381,6 @@ DEFAULT_USER_POOL_CONFIG: Dict[str, Any] = {
 
 
 class CognitoIdpUserPool(BaseModel):
-
     MAX_ID_LENGTH = 55
 
     def __init__(
@@ -1602,7 +1601,15 @@ class CognitoIdpBackend(BaseBackend):
 
             del self.sessions[session]
             return self._log_user_in(user_pool, client, username)
+        elif challenge_name == "SMS_MFA":
+            self.admin_get_user(user_pool.id, username)
 
+            sms_mfa_code = challenge_responses.get("SMS_MFA_CODE")
+            if sms_mfa_code != get_cognito_stub_sms_code():
+                raise CodeMismatchException()
+
+            del self.sessions[session]
+            return self._log_user_in(user_pool, client, username)
         else:
             return {}
 

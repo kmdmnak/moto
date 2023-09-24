@@ -39,6 +39,11 @@ class UserNotConfirmedException(JsonRESTError):
         super().__init__(error_type="UserNotConfirmedException", message=message)
 
 
+class CodeMismatchException(JsonRESTError):
+    def __init__(self, message: Optional[str] = None):
+        super().__init__(error_type="CodeMismatchException", message=message)
+
+
 class ExpiredCodeException(JsonRESTError):
     def __init__(self, message: str):
         super().__init__(error_type="ExpiredCodeException", message=message)
